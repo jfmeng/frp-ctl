@@ -1,0 +1,35 @@
+# frpctl 客户端全局配置文件示例
+# -----------------------------------------------------------
+# 放置位置（也可直接通过 `frpctl config` 命令交互生成）：
+#   Windows : C:\ProgramData\frpctl\frpctl.conf
+#   Linux   : /etc/frpctl/frpctl.conf
+#   macOS   : /usr/local/etc/frpctl/frpctl.conf
+#
+# 优先级：命令行参数 (--server / --token) > frpctl.conf > 脚本内置默认占位值
+# -----------------------------------------------------------
+
+# FRP 服务端连接信息（请修改为你的实际服务端域名/IP 与认证令牌）
+SERVER_ADDR=frp.example.com
+SERVER_PORT=49000
+AUTH_TOKEN=CHANGE_ME_TOKEN
+
+# FRP 客户端版本：留空或 "latest" = 自动获取最新 GitHub Release 版本
+FRP_VERSION=latest
+
+# GitHub 加速镜像（按顺序尝试，第一个可用即采用）
+# 多个地址用英文逗号分隔；留空或仅保留 https://github.com 则直连官方源
+GH_MIRRORS=https://ghfast.top/https://github.com,https://ghproxy.net/https://github.com,https://github.com
+
+# 默认穿透协议（执行 `frpctl install` 未指定 -t/--protocol 时的默认值）
+DEFAULT_PROTOCOL=rdp
+
+# WebSSH 模式（-t webssh）默认网页登录凭据，格式：用户名:密码
+# 留空则在安装 WebSSH 实例时交互提示输入
+# WEBSSH_AUTH=admin:ChangeMe123
+
+# 默认本地端口映射说明：
+#   rdp    -> 3389（自动同时配置 TCP + UDP 隧道）
+#   ssh    -> 22
+#   web    -> 80
+#   webssh -> 自动分配本地回环 127.0.0.1:(17681 + 远程端口%1000)，无需手填 --local-port
+# 以上均可通过 -l / --local-port 参数覆盖

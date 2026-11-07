@@ -1,0 +1,37 @@
+# OS & Shell artifacts
+nul
+.DS_Store
+Thumbs.db
+*.log
+*.bak
+*.old
+*.tmp
+
+# Local configurations & secrets (NEVER commit real credentials or certs)
+frpctl.conf
+frpc.toml
+frps.toml
+frpc_*.toml
+FRPService_*.xml
+TTYDService_*.xml
+ssl/
+*.pem
+*.key
+*.crt
+*.pfx
+.env
+.env.*
+
+# Runtime binaries
+frpc
+frpc.exe
+frps
+frps.exe
+ttyd
+ttyd.exe
+WinSW*.exe
+FRPService_*.exe
+TTYDService_*.exe
+drawer.js
+webssh_gw.py
+webssh_gw.ps1

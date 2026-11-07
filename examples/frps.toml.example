@@ -1,0 +1,23 @@
+# frps 服务端配置文件示例 (/usr/local/frp/frps.toml)
+# -----------------------------------------------------------
+# 启动方式建议：通过 systemd 托管 `/usr/local/frp/frps -c /usr/local/frp/frps.toml`
+# -----------------------------------------------------------
+
+# 客户端控制连接总端口（需在云厂商安全组/防火墙放行 TCP）
+bindPort = 49000
+
+# 认证配置（请务必修改为高强度随机字符串，并与客户端 AUTH_TOKEN 保持一致）
+auth.method = "token"
+auth.token = "CHANGE_ME_TOKEN"
+
+# 限制允许客户端绑定的公网端口范围（按需开启）
+# allowPorts = [
+#   { start = 40001, end = 40089 },
+#   { start = 50090, end = 50099 }
+# ]
+
+# 服务端 Dashboard 监控面板（安全建议：仅绑定 127.0.0.1 通过 SSH 隧道或反代访问，避免公网裸露）
+webServer.addr = "127.0.0.1"
+webServer.port = 49500
+webServer.user = "admin"
+webServer.password = "CHANGE_ME_DASHBOARD_PASSWORD"
