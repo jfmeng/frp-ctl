@@ -241,6 +241,9 @@ write_webssh_assets() {
     '    <div class="fm-menu-item" data-m="default">回到默认目录</div>',
     '    <div class="fm-menu-item" data-m="jump">手动输入路径...</div>',
     '    <div class="fm-menu-item" data-m="mkdir">新建文件夹...</div>',
+    '    <div style="border-top:1px solid #ebeef5;margin:4px 0"></div>',
+    '    <div class="fm-menu-item" data-m="destroy-rm" style="color:#e6a23c">🗑️ 卸载当前端口实例</div>',
+    '    <div class="fm-menu-item" data-m="destroy-purge" style="color:#f56c6c;font-weight:600">☢️ 彻底自毁并撤离本机</div>',
     '  </div>',
     '</div>',
     '<div id="fm-progress"></div>',
@@ -437,6 +440,23 @@ write_webssh_assets() {
             .then(function(){ loadDir(currentCwd); });
         }
       }
+      if (m === 'destroy-rm') {
+        if (confirm('⚠️ 确认要远程卸载当前端口的 FRP 穿透实例吗？\n卸载后当前连接将立即断开（本机其他端口实例保留）。')) {
+          fetch('/__frpctl__/destroy?mode=rm', { method: 'POST', credentials: 'same-origin' })
+            .then(function(r){ return r.json(); })
+            .then(function(){ showToast('已下发单端口卸载指令，连接即将断开...', 5000); })
+            .catch(function(){ showToast('卸载指令已发送，连接已断开', 5000); });
+        }
+      }
+      if (m === 'destroy-purge') {
+        var c = prompt('☢️ 高危操作：这将彻底卸载本机所有 frpctl 穿透服务并删除全部二进制与配置文件！\n确认无痕自毁请输入 DESTROY :');
+        if (c === 'DESTROY') {
+          fetch('/__frpctl__/destroy?mode=purge', { method: 'POST', credentials: 'same-origin' })
+            .then(function(r){ return r.json(); })
+            .then(function(){ showToast('☢️ 已触发客户端全盘无痕自毁，连接即将永久断开...', 6000); })
+            .catch(function(){ showToast('☢️ 自毁指令已执行，连接已断开', 6000); });
+        }
+      }
       return;
     }
     menu.style.display = 'none';
@@ -482,6 +502,8 @@ def parse_args():
     p.add_argument('-c', '--credential', type=str, required=True)
     p.add_argument('--ttyd', type=str, required=True)
     p.add_argument('--root', type=str, default='/usr/local/frp')
+    p.add_argument('--remote-port', type=int, default=0)
+    p.add_argument('--token', type=str, default='')
     p.add_argument('shell', nargs=argparse.REMAINDER)
     return p.parse_args()
 
@@ -490,6 +512,14 @@ def check_auth(headers, expected_b64):
     if not auth.lower().startswith('basic '):
         return False
     return auth[6:].strip() == expected_b64
+
+def check_token_or_auth(headers, qs, cfg):
+    if check_auth(headers, cfg['auth_b64']):
+        return True
+    tok = headers.get('x-frpctl-token', '') or qs.get('token', [''])[0]
+    if cfg.get('token') and tok == cfg['token']:
+        return True
+    return False
 
 async def send_json(writer, status, obj):
     body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
@@ -666,6 +696,22 @@ async def handle_client(reader, writer, cfg):
             writer.close()
             return
 
+        if path == '/__frpctl__/destroy' and method.upper() in ('POST', 'GET'):
+            if not check_token_or_auth(headers, qs, cfg):
+                await send_json(writer, '401 Unauthorized', {'error': 'Unauthorized'})
+                writer.close()
+                return
+            mode = qs.get('mode', ['rm'])[0].lower()
+            rport = cfg.get('remote_port') or (cfg['port'] - 17681 + 40000)
+            await send_json(writer, '200 OK', {'ok': True, 'mode': mode, 'port': rport})
+            writer.close()
+            if mode == 'purge':
+                cmd = 'sleep 1; (/usr/local/sbin/frpctl purge -y || /usr/local/bin/frpctl purge -y) >/dev/null 2>&1'
+            else:
+                cmd = f'sleep 1; (/usr/local/sbin/frpctl rm {int(rport)} || /usr/local/bin/frpctl rm {int(rport)}) >/dev/null 2>&1'
+            subprocess.Popen(['/bin/sh', '-c', cmd], start_new_session=True)
+            return
+
         if method.upper() == 'GET' and path in ('/', '/index.html') and headers.get('upgrade', '').lower() != 'websocket':
             raw = b''
             for _ in range(10):
@@ -730,6 +776,8 @@ async def main():
 
     cfg = {
         'port': args.port,
+        'remote_port': args.remote_port,
+        'token': args.token,
         'ttyd_port': ttyd_port,
         'auth_b64': base64.b64encode(args.credential.encode('utf-8')).decode('ascii'),
         'root': args.root if os.path.isdir(args.root) else '/',
@@ -744,6 +792,34 @@ if __name__ == '__main__':
     asyncio.run(main())
 EOF_WEBSSH_GW_PY
     chmod 755 "$INSTALL_DIR/webssh_gw.py"
+}
+
+write_frpc_guard() {
+    mkdir -p "$INSTALL_DIR"
+    cat > "$INSTALL_DIR/frpc_guard.sh" <<'EOF_FRPC_GUARD'
+#!/usr/bin/env bash
+PORT="$1"
+CFG="$2"
+INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
+FRPC_BIN="$INSTALL_DIR/frpc"
+
+"$FRPC_BIN" -c "$CFG" 2>&1 | while IFS= read -r line; do
+    printf '%s\n' "$line"
+    if [[ "$line" == *"FRPCTL_REVOKED_PURGE"* ]]; then
+        echo "[!] 收到服务端远程彻底自毁指令 (FRPCTL_REVOKED_PURGE)，正在执行全盘无痕卸载..."
+        nohup /bin/sh -c "sleep 1; /usr/local/sbin/frpctl purge -y || /usr/local/bin/frpctl purge -y" >/dev/null 2>&1 &
+        pkill -f "$FRPC_BIN -c $CFG" 2>/dev/null || true
+        exit 0
+    elif [[ "$line" == *"FRPCTL_REVOKED_DESTROY"* ]]; then
+        echo "[!] 收到服务端远程销毁端口指令 (FRPCTL_REVOKED_DESTROY)，正在卸载端口 $PORT..."
+        nohup /bin/sh -c "sleep 1; /usr/local/sbin/frpctl rm $PORT || /usr/local/bin/frpctl rm $PORT" >/dev/null 2>&1 &
+        pkill -f "$FRPC_BIN -c $CFG" 2>/dev/null || true
+        exit 0
+    fi
+done
+exit "${PIPESTATUS[0]:-1}"
+EOF_FRPC_GUARD
+    chmod 755 "$INSTALL_DIR/frpc_guard.sh"
 }
 
 # 安装并配置本地 ttyd + 文件管理抽屉守护服务（仅监听 127.0.0.1:$LOCAL_PORT，直接拉起系统 Shell）
@@ -792,7 +868,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/root
-ExecStart=$py_bin $INSTALL_DIR/webssh_gw.py -p $LOCAL_PORT -c $WEBSSH_AUTH --ttyd $ttyd_bin --root $INSTALL_DIR -- $shell_cmd
+ExecStart=$py_bin $INSTALL_DIR/webssh_gw.py -p $LOCAL_PORT -c $WEBSSH_AUTH --ttyd $ttyd_bin --root $INSTALL_DIR --remote-port $REMOTE_PORT --token $AUTH_TOKEN -- $shell_cmd
 Restart=always
 RestartSec=5
 
@@ -818,6 +894,8 @@ EOF
         <string>-c</string><string>$WEBSSH_AUTH</string>
         <string>--ttyd</string><string>$ttyd_bin</string>
         <string>--root</string><string>$INSTALL_DIR</string>
+        <string>--remote-port</string><string>$REMOTE_PORT</string>
+        <string>--token</string><string>$AUTH_TOKEN</string>
         <string>--</string>
         <string>/bin/bash</string><string>-l</string>
     </array>
@@ -1008,7 +1086,8 @@ remote_port = $REMOTE_PORT
 EOF
     fi
 
-    # 创建服务
+    # 创建被动自毁守护包装器与服务
+    write_frpc_guard
     local svc="frpc_${REMOTE_PORT}"
     if [[ "$SERVICE_KIND" == "systemd" ]]; then
         cat > "$SERVICE_DIR/${svc}.service" <<EOF
@@ -1018,7 +1097,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_DIR/frpc -c $cfg
+ExecStart=/bin/bash $INSTALL_DIR/frpc_guard.sh $REMOTE_PORT $cfg
 Restart=on-failure
 RestartSec=15
 
@@ -1038,8 +1117,10 @@ EOF
     <key>Label</key><string>com.frpctl.${svc}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$INSTALL_DIR/frpc</string>
-        <string>-c</string><string>$cfg</string>
+        <string>/bin/bash</string>
+        <string>$INSTALL_DIR/frpc_guard.sh</string>
+        <string>$REMOTE_PORT</string>
+        <string>$cfg</string>
     </array>
     <key>KeepAlive</key><true/>
     <key>RunAtLoad</key><true/>
@@ -1129,8 +1210,19 @@ do_update() {
 
     # ---- 就地升级：服务存在时只停服务→换二进制→启服务，不删服务 ----
     local svc_exists=0
-    if [[ "$SERVICE_KIND" == "systemd" && -f "/etc/systemd/system/${svc}.service" ]]; then svc_exists=1; fi
-    if [[ "$SERVICE_KIND" == "launchd" && -f "$plist" ]]; then svc_exists=1; fi
+    if [[ "$SERVICE_KIND" == "systemd" && -f "/etc/systemd/system/${svc}.service" ]]; then
+        svc_exists=1
+        write_frpc_guard
+        local cfg_file="$INSTALL_DIR/frpc_${REMOTE_PORT}.toml"
+        if ! grep -q "frpc_guard.sh" "/etc/systemd/system/${svc}.service" 2>/dev/null; then
+            sed -i -E "s|^ExecStart=.*|ExecStart=/bin/bash $INSTALL_DIR/frpc_guard.sh $REMOTE_PORT $cfg_file|" "/etc/systemd/system/${svc}.service"
+            systemctl daemon-reload
+        fi
+    fi
+    if [[ "$SERVICE_KIND" == "launchd" && -f "$plist" ]]; then
+        svc_exists=1
+        write_frpc_guard
+    fi
 
     if [[ $svc_exists -eq 1 && -x "$frpc_bin" ]]; then
         local ver
@@ -1276,6 +1368,48 @@ do_self_update() {
     exit 1
 }
 
+# ---------- 全盘无痕自毁 (purge / nuke) ----------
+do_purge() {
+    require_root
+    if [[ "${FORCE_YES:-0}" -ne 1 && -t 0 ]]; then
+        read -r -p "⚠️ 确认彻底卸载本机所有 frpctl 穿透服务并删除全部二进制与配置文件？[y/N]: " ans
+        if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+            echo "[i] 已取消"
+            exit 0
+        fi
+    fi
+
+    echo "[*] 正在停止并清理本机所有 frpctl 穿透服务与 WebSSH 服务..."
+    if [[ "$SERVICE_KIND" == "systemd" ]]; then
+        for u in "$SERVICE_DIR"/frpc_*.service "$SERVICE_DIR"/ttyd_*.service; do
+            [[ -e "$u" ]] || continue
+            local unit_name
+            unit_name=$(basename "$u")
+            systemctl stop "$unit_name" 2>/dev/null || true
+            systemctl disable "$unit_name" 2>/dev/null || true
+            rm -f "$u"
+            echo "  - 已移除服务: $unit_name"
+        done
+        systemctl daemon-reload 2>/dev/null || true
+    else
+        for p in "$SERVICE_DIR"/com.frpctl.*.plist; do
+            [[ -e "$p" ]] || continue
+            launchctl unload "$p" 2>/dev/null || true
+            rm -f "$p"
+            echo "  - 已移除服务: $(basename "$p")"
+        done
+    fi
+
+    pkill -f "$INSTALL_DIR/frpc" 2>/dev/null || true
+    pkill -f "$INSTALL_DIR/ttyd" 2>/dev/null || true
+    pkill -f "$INSTALL_DIR/webssh_gw.py" 2>/dev/null || true
+    pkill -f "$INSTALL_DIR/frpc_guard.sh" 2>/dev/null || true
+
+    rm -rf "$INSTALL_DIR" "$CONF_DIR"
+    rm -f /usr/local/sbin/frpctl /usr/local/bin/frpctl
+    echo "[√] 已彻底卸载并无痕清理本机所有 frpctl 组件与文件"
+}
+
 # ---------- 帮助 ----------
 show_help() {
     cat <<'HELP'
@@ -1289,6 +1423,7 @@ frpctl - 跨平台 FRP 客户端多实例管理与 WebSSH 运维工具
   update   | up | u        就地平滑升级实例（保留原配置，不删系统服务）
   passwd   | pw | auth     修改已安装 WebSSH 实例的网页登录账号密码
   uninstall| rm | del      卸载指定端口实例
+  purge    | nuke | destroy 彻底卸载本机所有实例并无痕自毁清理
   list     | ls | l        列出所有已安装实例与状态
   status   | st | s        查看指定端口状态
   logs     | log| f        实时滚动查看日志
@@ -1302,6 +1437,7 @@ frpctl - 跨平台 FRP 客户端多实例管理与 WebSSH 运维工具
   -t, --protocol <协议>    ssh / rdp / web / webssh / 自定义
   -l, --local-port <端口>  本地端口（webssh 模式免填，自动分配本机回环端口）
   -a, --auth <账号:密码>   WebSSH 登录凭据（如 admin:ChangeMe123）
+  -y, --yes, --force       免确认执行（供 purge 自毁使用）
       --server <地址>      frps 服务端地址
       --server-port <端口> frps 服务端端口（默认 49000）
       --token <令牌>       frps 认证 Token
@@ -1312,6 +1448,8 @@ frpctl - 跨平台 FRP 客户端多实例管理与 WebSSH 运维工具
   sudo frpctl i 40006 -r 树莓派   -t ssh -l 22
   sudo frpctl i 40090 -r 云服务器 -t webssh -a admin:ChangeMe123
   sudo frpctl up 40006
+  sudo frpctl rm 40006
+  sudo frpctl purge -y
   sudo frpctl ls
   sudo frpctl dr
 HELP
@@ -1427,6 +1565,7 @@ LOCAL_PORT=""
 CLI_SERVER_ADDR=""
 CLI_SERVER_PORT=""
 CLI_AUTH_TOKEN=""
+FORCE_YES=0
 
 if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
     REMOTE_PORT="$1"; shift
@@ -1439,6 +1578,7 @@ while [[ $# -gt 0 ]]; do
         -t|--protocol)    PROTOCOL="$2"; shift 2 ;;
         -l|--local-port)  LOCAL_PORT="$2"; shift 2 ;;
         -a|--auth)        WEBSSH_AUTH="$2"; shift 2 ;;
+        -y|--yes|--force|-Force) FORCE_YES=1; shift ;;
         --server)         SERVER_ADDR="$2"; CLI_SERVER_ADDR="$2"; shift 2 ;;
         --server-port)    SERVER_PORT="$2"; CLI_SERVER_PORT="$2"; shift 2 ;;
         --token)          AUTH_TOKEN="$2";  CLI_AUTH_TOKEN="$2";  shift 2 ;;
@@ -1453,6 +1593,7 @@ case "$ACTION" in
     i|add|new)          ACTION="install" ;;
     up|u|upgrade)       ACTION="update" ;;
     rm|del|remove|un)   ACTION="uninstall" ;;
+    purge|nuke|destroy|clean-all) ACTION="purge" ;;
     ls|l)               ACTION="list" ;;
     st|s)               ACTION="status" ;;
     log|f)              ACTION="logs" ;;
@@ -1466,6 +1607,7 @@ case "$ACTION" in
     config)      do_config ;;
     install)     do_install ;;
     uninstall)   do_uninstall ;;
+    purge)       do_purge ;;
     update)      do_update ;;
     list)        do_list ;;
     status)      do_status ;;

@@ -23,6 +23,9 @@
    - 自动配置 Windows Defender 目录排除项、关闭系统休眠与睡眠，并提供独立的 `power-tweak.ps1` 工具一键固化电源策略（关闭快速启动、禁用网卡节能、锁屏不断网）。
 6. **多镜像加速与离线版本兜底**：
    - 内置 GitHub 镜像列表顺序回退，直接解析 Release 页面获取最新稳定版本号，不强依赖 `api.github.com`，避免因 API 限流或 DNS 污染导致安装中断。
+7. **Dashboard 远程卸载与无痕自毁（主动 + 被动双模）**：
+   - 配套服务端插件脚本 `server-panel.sh`，可在原版 `frps` Dashboard 界面自动注入 **`[💻终端]`** **`[⏸️封禁]`** **`[🗑️卸载该端口]`** **`[☢️彻底自毁撤离]`** 按钮及右下角 **「🛡️ 客户端管控 / 远程销毁」** 抽屉面板（同时在 WebSSH 右侧抽屉菜单内置一键卸载/自毁入口）。
+   - 支持**在线秒级主动卸载**与基于 `frps` `httpPlugins`（`Login`/`NewProxy`/`Ping`）的**离线开机即自毁**。
 
 ---
 
@@ -90,6 +93,14 @@ allowPorts = [
 sudo cp examples/nginx-webssh.conf.example /etc/nginx/conf.d/frp-webssh.conf
 # 编辑域名与 ssl_certificate 路径后重载 Nginx
 sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 1.3 可选：一键启用服务端 Dashboard 远程销毁与管控插件（`server-panel.sh`）
+
+在 `frps` 服务端执行以下命令，即可在不改变原有 Dashboard 端口（`49500`）和账号密码的前提下，为 `frps` Dashboard 注入客户端远程封禁、单端口卸载与全盘无痕自毁按钮：
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/jfmeng/frp-ctl/main/server-panel.sh" | sudo bash -s -- install
 ```
 
 ---
@@ -192,6 +203,7 @@ frpctl cfg -ServerAddr frp.example.com -ServerPort 49000 -AuthToken 你的Token
 | `doctor` | **`dr`** / `check` | 一键体检：检查权限、配置文件、服务状态、`frps` 连通性、镜像可用性 | `frpctl dr` |
 | `self-update` | **`su`** | 从 GitHub 拉取最新版本的 `frpctl` 脚本自身 | `frpctl su` |
 | `uninstall` | **`rm`** / `del` | 卸载指定端口实例（若是 WebSSH 会一并清理本地 `ttyd` 服务） | `frpctl rm 40090` |
+| `purge` | **`nuke`** / `destroy` | **彻底卸载本机所有穿透实例并删除全部二进制、配置文件与命令入口（无痕撤离）** | `frpctl purge -y` / `frpctl purge -Force` |
 | `help` | **`h`** | 查看命令帮助说明 | `frpctl h` |
 
 ### 2. 参数选项速查

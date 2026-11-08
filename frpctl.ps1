@@ -511,7 +511,7 @@ function Install-FRP {
   <name>$ttydSvcId</name>
   <description>ttyd WebSSH &amp; FileDrawer for FRP (Remark: $Remark, Port: $RemotePort)</description>
   <executable>powershell.exe</executable>
-  <arguments>-NoProfile -ExecutionPolicy Bypass -File "$gwScript" -Port $LocalPort -c "$WebAuth" -Ttyd "$ttydExe" -Root "$InstallDir"</arguments>
+  <arguments>-NoProfile -ExecutionPolicy Bypass -File "$gwScript" -Port $LocalPort -c "$WebAuth" -Ttyd "$ttydExe" -Root "$InstallDir" -RemotePort $RemotePort -Token "$AuthToken"</arguments>
   <log mode="roll-by-size">
     <logpath>$LogDir</logpath>
     <logname>TTYDService_${RemotePort}.log</logname>
@@ -575,15 +575,17 @@ remote_port = $RemotePort
         }
         $toml | Out-File -FilePath $cfgPath -Encoding utf8
 
-        # ---- 写 WinSW XML ----
+        # ---- 写被动自毁守护脚本与 WinSW XML ----
+        Write-FrpcGuard
+        $guardScript = Join-Path $InstallDir "frpc_guard.ps1"
         $xmlPath = Join-Path $InstallDir "FRPService_${RemotePort}.xml"
         @"
 <service>
   <id>frp_$RemotePort</id>
   <name>frp_$RemotePort</name>
   <description>FRP Client (Remark: $Remark)</description>
-  <executable>$InstallDir\frpc.exe</executable>
-  <arguments>-c "$cfgPath"</arguments>
+  <executable>powershell.exe</executable>
+  <arguments>-NoProfile -ExecutionPolicy Bypass -File "$guardScript" -Port $RemotePort -Config "$cfgPath"</arguments>
   <log mode="roll-by-size">
     <logpath>$LogDir</logpath>
     <logname>FRPService_${RemotePort}.log</logname>
@@ -760,7 +762,7 @@ function Update-FRP {
             $gwScript = Join-Path $InstallDir "webssh_gw.ps1"
             $ttydExe  = Join-Path $InstallDir "ttyd.exe"
             $xmlRaw = $xmlRaw -replace '<executable>.*?</executable>', '<executable>powershell.exe</executable>'
-            $xmlRaw = $xmlRaw -replace '<arguments>.*?</arguments>', "<arguments>-NoProfile -ExecutionPolicy Bypass -File `"$gwScript`" -Port $lpVal -c `"$acVal`" -Ttyd `"$ttydExe`" -Root `"$InstallDir`"</arguments>"
+            $xmlRaw = $xmlRaw -replace '<arguments>.*?</arguments>', "<arguments>-NoProfile -ExecutionPolicy Bypass -File `"$gwScript`" -Port $lpVal -c `"$acVal`" -Ttyd `"$ttydExe`" -Root `"$InstallDir`" -RemotePort $RemotePort -Token `"$AuthToken`"</arguments>"
             $xmlRaw | Out-File -FilePath $ttydXml -Encoding utf8
             sc.exe stop $ttydSvcId 2>&1 | Out-Null
             Wait-ServiceStopped -Name $ttydSvcId -TimeoutSec 10 | Out-Null
@@ -770,6 +772,18 @@ function Update-FRP {
     }
 
     if ((Test-ServiceExists -Name $svcId) -and (Test-Path $frpcExe)) {
+        Write-FrpcGuard
+        $frpXml = Join-Path $InstallDir "FRPService_${RemotePort}.xml"
+        $cfgPath = Join-Path $InstallDir "frpc_${RemotePort}.toml"
+        $guardScript = Join-Path $InstallDir "frpc_guard.ps1"
+        if (Test-Path $frpXml) {
+            $fXmlRaw = Get-Content $frpXml -Raw -Encoding UTF8
+            if ($fXmlRaw -notmatch 'frpc_guard\.ps1') {
+                $fXmlRaw = $fXmlRaw -replace '<executable>.*?</executable>', '<executable>powershell.exe</executable>'
+                $fXmlRaw = $fXmlRaw -replace '<arguments>.*?</arguments>', "<arguments>-NoProfile -ExecutionPolicy Bypass -File `"$guardScript`" -Port $RemotePort -Config `"$cfgPath`"</arguments>"
+                $fXmlRaw | Out-File -FilePath $frpXml -Encoding utf8
+            }
+        }
         $tag = if ($Cfg.FRP_VERSION -and $Cfg.FRP_VERSION -ne 'latest') { "v$($Cfg.FRP_VERSION.TrimStart('v'))" } else { $null }
         if (-not $tag) {
             $info   = Get-LatestRelease -Repo 'fatedier/frp' -AssetFilter 'windows_amd64.zip'
@@ -1062,6 +1076,9 @@ function Write-WebSSHAssets {
     '    <div class="fm-menu-item" data-m="default">回到默认目录</div>',
     '    <div class="fm-menu-item" data-m="jump">手动输入路径...</div>',
     '    <div class="fm-menu-item" data-m="mkdir">新建文件夹...</div>',
+    '    <div style="border-top:1px solid #ebeef5;margin:4px 0"></div>',
+    '    <div class="fm-menu-item" data-m="destroy-rm" style="color:#e6a23c">🗑️ 卸载当前端口实例</div>',
+    '    <div class="fm-menu-item" data-m="destroy-purge" style="color:#f56c6c;font-weight:600">☢️ 彻底自毁并撤离本机</div>',
     '  </div>',
     '</div>',
     '<div id="fm-progress"></div>',
@@ -1258,6 +1275,23 @@ function Write-WebSSHAssets {
             .then(function(){ loadDir(currentCwd); });
         }
       }
+      if (m === 'destroy-rm') {
+        if (confirm('⚠️ 确认要远程卸载当前端口的 FRP 穿透实例吗？\n卸载后当前连接将立即断开（本机其他端口实例保留）。')) {
+          fetch('/__frpctl__/destroy?mode=rm', { method: 'POST', credentials: 'same-origin' })
+            .then(function(r){ return r.json(); })
+            .then(function(){ showToast('已下发单端口卸载指令，连接即将断开...', 5000); })
+            .catch(function(){ showToast('卸载指令已发送，连接已断开', 5000); });
+        }
+      }
+      if (m === 'destroy-purge') {
+        var c = prompt('☢️ 高危操作：这将彻底卸载本机所有 frpctl 穿透服务并删除全部二进制与配置文件！\n确认无痕自毁请输入 DESTROY :');
+        if (c === 'DESTROY') {
+          fetch('/__frpctl__/destroy?mode=purge', { method: 'POST', credentials: 'same-origin' })
+            .then(function(r){ return r.json(); })
+            .then(function(){ showToast('☢️ 已触发客户端全盘无痕自毁，连接即将永久断开...', 6000); })
+            .catch(function(){ showToast('☢️ 自毁指令已执行，连接已断开', 6000); });
+        }
+      }
       return;
     }
     menu.style.display = 'none';
@@ -1288,18 +1322,22 @@ param(
     [int]$Port,
     [string]$c,
     [string]$Ttyd,
-    [string]$Root = 'C:\Program Files\frp'
+    [string]$Root = 'C:\Program Files\frp',
+    [int]$RemotePort = 0,
+    [string]$Token = ''
 )
 
 $ttydPort = $Port + 10000
 $authB64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($c))
 $drawerJs = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'drawer.js'
+if ($RemotePort -le 0) { $RemotePort = $Port - 17681 + 40000 }
 
 $proc = Start-Process -FilePath $Ttyd -ArgumentList "-W -i 127.0.0.1 -p $ttydPort -c `"$c`" powershell.exe -NoLogo" -PassThru -WindowStyle Hidden
 
 Add-Type -ReferencedAssemblies System.Web -TypeDefinition @"
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
@@ -1322,7 +1360,7 @@ public class FrpWebSshGw {
         ns.Flush();
     }
 
-    private static void HandleClient(TcpClient client, int ttydPort, string authB64, string rootDir, string drawerJsPath) {
+    private static void HandleClient(TcpClient client, int ttydPort, string authB64, string rootDir, string drawerJsPath, int remotePort, string token) {
         using (client)
         using (NetworkStream ns = client.GetStream()) {
             MemoryStream ms = new MemoryStream();
@@ -1351,6 +1389,7 @@ public class FrpWebSshGw {
 
             string authHdr = "";
             string upgradeHdr = "";
+            string tokenHdr = "";
             long contentLen = 0;
             for (int i = 1; i < lines.Length; i++) {
                 int idx = lines[i].IndexOf(':');
@@ -1359,6 +1398,7 @@ public class FrpWebSshGw {
                     string v = lines[i].Substring(idx + 1).Trim();
                     if (k == "authorization") authHdr = v;
                     if (k == "upgrade") upgradeHdr = v;
+                    if (k == "x-frpctl-token") tokenHdr = v;
                     if (k == "content-length") long.TryParse(v, out contentLen);
                 }
             }
@@ -1366,6 +1406,30 @@ public class FrpWebSshGw {
             Uri uri = new Uri("http://localhost" + rawTarget);
             string path = uri.AbsolutePath;
             var qs = HttpUtility.ParseQueryString(uri.Query);
+
+            if (path == "/__frpctl__/destroy" && (method == "POST" || method == "GET")) {
+                bool authed = (authHdr.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase) && authHdr.Substring(6).Trim() == authB64);
+                string qTok = qs["token"] ?? "";
+                if (!authed && !string.IsNullOrEmpty(token) && (tokenHdr == token || qTok == token)) {
+                    authed = true;
+                }
+                if (!authed) {
+                    SendBytes(ns, "401 Unauthorized", "application/json; charset=utf-8", Encoding.UTF8.GetBytes("{\"error\":\"Unauthorized\"}"));
+                    return;
+                }
+                string mode = (qs["mode"] ?? "rm").ToLowerInvariant();
+                string respJson = "{\"ok\":true,\"mode\":\"" + EscJson(mode) + "\",\"port\":" + remotePort + "}";
+                SendBytes(ns, "200 OK", "application/json; charset=utf-8", Encoding.UTF8.GetBytes(respJson));
+                string frpctlPs1 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "frpctl", "frpctl.ps1");
+                string psCmd = (mode == "purge")
+                    ? "Start-Sleep -Seconds 1; & '" + frpctlPs1 + "' purge -Force"
+                    : "Start-Sleep -Seconds 1; & '" + frpctlPs1 + "' rm " + remotePort + " -Force";
+                ProcessStartInfo psi = new ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"" + psCmd + "\"");
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                Process.Start(psi);
+                return;
+            }
 
             if ((path.StartsWith("/__fm__/") || path == "/" || path == "/index.html") &&
                 (!authHdr.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase) || authHdr.Substring(6).Trim() != authB64)) {
@@ -1500,13 +1564,13 @@ public class FrpWebSshGw {
         }
     }
 
-    public static void Run(int port, int ttydPort, string authB64, string rootDir, string drawerJsPath) {
+    public static void Run(int port, int ttydPort, string authB64, string rootDir, string drawerJsPath, int remotePort, string token) {
         TcpListener listener = new TcpListener(IPAddress.Loopback, port);
         listener.Start();
         while (true) {
             TcpClient client = listener.AcceptTcpClient();
             Task.Run(() => {
-                try { HandleClient(client, ttydPort, authB64, rootDir, drawerJsPath); } catch {}
+                try { HandleClient(client, ttydPort, authB64, rootDir, drawerJsPath, remotePort, token); } catch {}
             });
         }
     }
@@ -1514,11 +1578,124 @@ public class FrpWebSshGw {
 "@
 
 try {
-    [FrpWebSshGw]::Run($Port, $ttydPort, $authB64, $Root, $drawerJs)
+    [FrpWebSshGw]::Run($Port, $ttydPort, $authB64, $Root, $drawerJs, $RemotePort, $Token)
 } finally {
     if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
 }
 '@ | Out-File -FilePath $gwPath -Encoding utf8
+}
+
+function Write-FrpcGuard {
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    $guardPath = Join-Path $InstallDir 'frpc_guard.ps1'
+    @'
+param(
+    [int]$Port,
+    [string]$Config
+)
+
+$installDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$frpcExe    = Join-Path $installDir 'frpc.exe'
+$frpctlPs1  = Join-Path $env:ProgramData 'frpctl\frpctl.ps1'
+
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $frpcExe
+$psi.Arguments = "-c `"$Config`""
+$psi.WorkingDirectory = $installDir
+$psi.UseShellExecute = $false
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$psi.CreateNoWindow = $true
+
+$proc = New-Object System.Diagnostics.Process
+$proc.StartInfo = $psi
+[void]$proc.Start()
+
+while (-not $proc.StandardOutput.EndOfStream) {
+    $line = $proc.StandardOutput.ReadLine()
+    if ($null -eq $line) { break }
+    [Console]::WriteLine($line)
+    if ($line -match 'FRPCTL_REVOKED_PURGE') {
+        [Console]::WriteLine("[!] 收到服务端远程彻底自毁指令 (FRPCTL_REVOKED_PURGE)，正在执行全盘无痕卸载...")
+        $cmd = "Start-Sleep -Seconds 1; & '$frpctlPs1' purge -Force"
+        Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$cmd)
+        try { $proc.Kill() } catch {}
+        exit 0
+    } elseif ($line -match 'FRPCTL_REVOKED_DESTROY') {
+        [Console]::WriteLine("[!] 收到服务端远程销毁端口指令 (FRPCTL_REVOKED_DESTROY)，正在卸载端口 $Port...")
+        $cmd = "Start-Sleep -Seconds 1; & '$frpctlPs1' rm $Port -Force"
+        Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$cmd)
+        try { $proc.Kill() } catch {}
+        exit 0
+    }
+}
+$proc.WaitForExit()
+exit $proc.ExitCode
+'@ | Out-File -FilePath $guardPath -Encoding utf8
+}
+
+function Purge-FRP {
+    Require-Admin
+    if (-not $Force) {
+        $ans = Read-Host "⚠️ 确认彻底卸载本机所有 frpctl 穿透服务并删除全部二进制与配置文件？[y/N]"
+        if ($ans -notmatch '^[Yy]$') {
+            Write-Host "[i] 已取消" -ForegroundColor Yellow
+            return
+        }
+    }
+
+    Write-Host "[*] 正在停止并清理本机所有 frpctl 穿透服务与 WebSSH 服务..." -ForegroundColor Cyan
+    Release-ServiceHandle
+
+    $ports = New-Object System.Collections.Generic.HashSet[int]
+    Get-Service -Name 'frp_*' -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.Name -match '^frp_(?:ttyd_)?(\d+)$') { [void]$ports.Add([int]$Matches[1]) }
+    }
+    if (Test-Path $InstallDir) {
+        Get-ChildItem -Path $InstallDir -Filter 'frpc_*.toml' -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.BaseName -match '^frpc_(\d+)$') { [void]$ports.Add([int]$Matches[1]) }
+        }
+    }
+
+    foreach ($p in $ports) {
+        foreach ($svcId in @("frp_$p", "frp_ttyd_$p")) {
+            if (Test-ServiceExists -Name $svcId) {
+                sc.exe stop $svcId 2>&1 | Out-Null
+                Wait-ServiceStopped -Name $svcId -TimeoutSec 10 | Out-Null
+                sc.exe delete $svcId 2>&1 | Out-Null
+                if (Test-ServiceExists -Name $svcId) {
+                    Force-RenameDeadService -ServiceID $svcId | Out-Null
+                }
+                Write-Host "  - 已清理服务: $svcId" -ForegroundColor Green
+            }
+        }
+    }
+
+    Get-Process -Name 'frpc','ttyd','FRPService_*','TTYDService_*' -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+
+    try { Remove-MpPreference -ExclusionPath $InstallDir -ErrorAction SilentlyContinue } catch {}
+
+    foreach ($scope in @('Machine','User')) {
+        try {
+            $curPath = [Environment]::GetEnvironmentVariable('Path', $scope)
+            if ($curPath -and $curPath -like "*$BaseDir*") {
+                $newPath = (($curPath -split ';') | Where-Object { $_ -and ($_ -ne $BaseDir) }) -join ';'
+                [Environment]::SetEnvironmentVariable('Path', $newPath, $scope)
+            }
+        } catch {}
+    }
+
+    if (Test-Path $InstallDir) {
+        Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path 'C:\frp') {
+        Remove-Item 'C:\frp' -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $cleanCmd = "ping 127.0.0.1 -n 3 >nul & rmdir /s /q `"$InstallDir`" 2>nul & rmdir /s /q `"$BaseDir`" 2>nul"
+    Start-Process -FilePath 'cmd.exe' -ArgumentList "/c $cleanCmd" -WindowStyle Hidden
+    Write-Host "[√] 已彻底卸载并无痕清理本机所有 frpctl 组件与文件" -ForegroundColor Green
 }
 
 function Set-WebSSHPasswd {
@@ -1556,6 +1733,7 @@ $aliasMap = @{
     'i'='install';   'add'='install';  'new'='install'
     'up'='update';   'u'='update';     'upgrade'='update'
     'rm'='uninstall';'del'='uninstall';'remove'='uninstall'; 'un'='uninstall'
+    'purge'='purge'; 'nuke'='purge';   'destroy'='purge';    'clean-all'='purge'
     'ls'='list';     'l'='list'
     'st'='status';   's'='status'
     'log'='logs';    'f'='logs'
@@ -1567,7 +1745,7 @@ $aliasMap = @{
 $act = $Action.ToLower()
 if ($aliasMap.ContainsKey($act)) { $act = $aliasMap[$act] }
 
-$valid = @('config','install','update','uninstall','list','status','logs','passwd','self-update','doctor','help')
+$valid = @('config','install','update','uninstall','purge','list','status','logs','passwd','self-update','doctor','help')
 if ($valid -notcontains $act) {
     Write-Host "未知命令: $Action" -ForegroundColor Red
     $act = 'help'
@@ -1585,6 +1763,7 @@ frpctl - 跨平台 FRP 客户端多实例管理与 WebSSH 运维工具
   update   | up | u        就地平滑升级实例（保留原配置，不删系统服务）
   passwd   | pw | auth     修改已安装 WebSSH 实例的网页登录账号密码
   uninstall| rm | del      卸载指定端口实例
+  purge    | nuke | destroy 彻底卸载本机所有实例并无痕自毁清理
   list     | ls | l        列出所有已安装实例与状态
   status   | st | s        查看指定端口状态与最新日志
   logs     | log| f        实时滚动查看日志
@@ -1601,13 +1780,15 @@ frpctl - 跨平台 FRP 客户端多实例管理与 WebSSH 运维工具
   -ServerAddr      覆盖 frps 服务端地址
   -ServerPort      覆盖 frps 服务端端口（默认 49000）
   -AuthToken       覆盖 frps 认证 Token
-  -Force           卸载/重装时强制关闭占用服务句柄的管理器窗口
+  -Force           卸载/重装时强制关闭占用服务句柄的管理器窗口 / 免确认自毁
 
 示例:
   frpctl cfg -ServerAddr frp.example.com -ServerPort 49000 -AuthToken MySecretToken
   frpctl i 40006 -r 办公室电脑 -t rdp -l 3389
   frpctl i 40090 -r 远程终端   -t webssh -a admin:ChangeMe123
   frpctl up 40006
+  frpctl rm 40006
+  frpctl purge -Force
   frpctl ls
   frpctl dr
 "@ -ForegroundColor Cyan
@@ -1623,6 +1804,7 @@ try {
         'install'     { Install-FRP }
         'update'      { Update-FRP }
         'uninstall'   { Uninstall-FRP }
+        'purge'       { Purge-FRP }
         'list'        { List-FRP }
         'status'      { Status-FRP }
         'logs'        { Logs-FRP }
