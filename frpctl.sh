@@ -1032,14 +1032,20 @@ do_install() {
     echo "[*] FRP 版本: $ver  ($OS/$ARCH)"
 
     mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/logs"
-    local tmp="/tmp/frp_${RANDOM}.tar.gz"
-    if ! download_with_mirrors "fatedier/frp/releases/download/$tag/$asset" "$tmp"; then
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    if ! download_with_mirrors "fatedier/frp/releases/download/$tag/$asset" "$tmp_dir/frp.tar.gz"; then
+        rm -rf "$tmp_dir"
         echo "[X] frp 下载失败：所有镜像不可达" >&2
         exit 1
     fi
-    tar -xzf "$tmp" -C "$INSTALL_DIR" --strip-components=1
-    rm -f "$tmp"
-    chmod 755 "$INSTALL_DIR/frpc"
+    # 仅提取 frpc 二进制，绝不覆盖同目录下的 frps 或 frps.toml
+    tar -xzf "$tmp_dir/frp.tar.gz" -C "$tmp_dir"
+    local new_bin
+    new_bin=$(find "$tmp_dir" -name frpc -type f | head -1)
+    [[ -z "$new_bin" ]] && { rm -rf "$tmp_dir"; echo "[X] 下载包中未找到 frpc" >&2; exit 1; }
+    install -m 755 "$new_bin" "$INSTALL_DIR/frpc"
+    rm -rf "$tmp_dir"
 
     # 如为 webssh 模式，先安装并启动本地 ttyd 守护服务
     if [[ "$SAFE_PROTO" == "webssh" ]]; then
@@ -1177,11 +1183,11 @@ do_uninstall() {
     fi
     rm -f "$cfg"
 
-    if ! ls "$INSTALL_DIR"/frpc_*.toml >/dev/null 2>&1; then
+    if ! ls "$INSTALL_DIR"/frpc_*.toml >/dev/null 2>&1 && [[ ! -f "$INSTALL_DIR/frps.toml" && ! -f "$INSTALL_DIR/frps.ini" ]]; then
         rm -rf "$INSTALL_DIR"
         echo "[√] 已删除最后一个实例，连同安装目录一起清理"
     else
-        echo "[√] 端口 $REMOTE_PORT 实例已卸载（其他实例保留）"
+        echo "[√] 端口 $REMOTE_PORT 实例已卸载（其他实例或 frps 服务端完整保留）"
     fi
 }
 
@@ -1252,9 +1258,19 @@ do_update() {
         local tmp_dir asset
         tmp_dir=$(mktemp -d)
         asset="frp_${ver}_${OS}_${ARCH}.tar.gz"
-        echo "[*] 下载 $asset..."
-        if ! download_with_mirrors "fatedier/frp/releases/download/v${ver}/${asset}" "$tmp_dir/frp.tar.gz"; then
-            echo "[X] 下载失败：所有镜像不可达" >&2; exit 1
+        if [[ -s "$INSTALL_DIR/$asset" ]]; then
+            echo "[*] 检测到本地离线包 $INSTALL_DIR/$asset，直接使用..."
+            cp -f "$INSTALL_DIR/$asset" "$tmp_dir/frp.tar.gz"
+        elif [[ -s "/tmp/$asset" ]]; then
+            echo "[*] 检测到本地离线包 /tmp/$asset，直接使用..."
+            cp -f "/tmp/$asset" "$tmp_dir/frp.tar.gz"
+        else
+            echo "[*] 下载 $asset..."
+            if ! download_with_mirrors "fatedier/frp/releases/download/v${ver}/${asset}" "$tmp_dir/frp.tar.gz"; then
+                rm -rf "$tmp_dir"
+                echo "[X] 下载失败：所有镜像不可达（也可将 $asset 上传到 $INSTALL_DIR 后再执行本命令）" >&2
+                exit 1
+            fi
         fi
         tar -xzf "$tmp_dir/frp.tar.gz" -C "$tmp_dir"
         local new_bin
