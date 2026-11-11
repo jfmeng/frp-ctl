@@ -179,7 +179,7 @@ get_latest_tag_via_mirrors() {
 }
 
 get_latest_frp_version() {
-    get_latest_tag_via_mirrors "fatedier/frp" "0.68.1"
+    get_latest_tag_via_mirrors "fatedier/frp" "0.72.0"
 }
 
 get_latest_ttyd_version() {
@@ -1185,30 +1185,36 @@ do_uninstall() {
     fi
 }
 
-# ---------- 就地平滑升级 ----------
+# ---------- 就地平滑升级（支持在当前端口 WebSSH 终端内直接执行而不自杀） ----------
 do_update() {
     require_root
     [[ -z "${REMOTE_PORT:-}" ]] && { echo "[X] 必须指定端口，如: sudo frpctl up 40005" >&2; exit 1; }
+
+    # 忽略 SIGHUP，防止在 WebSSH 终端内执行升级导致隧道重连瞬间挂断脚本
+    trap '' HUP
 
     local svc="frpc_${REMOTE_PORT}"
     local frpc_bin="$INSTALL_DIR/frpc"
     local plist="$SERVICE_DIR/com.frpctl.${svc}.plist"
 
-    # 若存在配套的 ttyd_<port> 服务，同步升级 WebSSH 右侧文件管理抽屉组件
+    # 若存在配套的 ttyd_<port> 服务，仅静默更新静态前端与网关脚本，不提前重启 ttyd（避免在 WebSSH 内执行时自杀）
     local ttyd_unit="/etc/systemd/system/ttyd_${REMOTE_PORT}.service"
+    local need_ttyd_restart=0
     if [[ "$SERVICE_KIND" == "systemd" && -f "$ttyd_unit" ]]; then
         ensure_deps
-        LOCAL_PORT=$(grep -oE '\-p [0-9]+' "$ttyd_unit" | head -1 | awk '{print $2}')
-        WEBSSH_AUTH=$(grep -oE '\-c [^ ]+' "$ttyd_unit" | head -1 | awk '{print $2}' | tr -d '"')
-        REMARK=$(grep -oE 'Remark: [^,]+' "$ttyd_unit" | head -1 | sed 's/Remark: //')
-        if [[ -n "$LOCAL_PORT" && -n "$WEBSSH_AUTH" ]]; then
-            echo "[*] 同步升级 WebSSH 右侧文件管理器组件 (ttyd_${REMOTE_PORT})..."
-            setup_ttyd_service
-            echo "[√] WebSSH 文件管理器组件已就绪"
+        if grep -q "webssh_gw.py" "$ttyd_unit" 2>/dev/null; then
+            write_webssh_assets
+        else
+            LOCAL_PORT=$(grep -oE '\-p [0-9]+' "$ttyd_unit" | head -1 | awk '{print $2}')
+            WEBSSH_AUTH=$(grep -oE '\-c [^ ]+' "$ttyd_unit" | head -1 | awk '{print $2}' | tr -d '"')
+            REMARK=$(grep -oE 'Remark: [^,]+' "$ttyd_unit" | head -1 | sed 's/Remark: //')
+            if [[ -n "$LOCAL_PORT" && -n "$WEBSSH_AUTH" ]]; then
+                need_ttyd_restart=1
+            fi
         fi
     fi
 
-    # ---- 就地升级：服务存在时只停服务→换二进制→启服务，不删服务 ----
+    # ---- 就地升级：服务存在时先下载并原子替换二进制，再重启服务 ----
     local svc_exists=0
     if [[ "$SERVICE_KIND" == "systemd" && -f "/etc/systemd/system/${svc}.service" ]]; then
         svc_exists=1
@@ -1238,7 +1244,8 @@ do_update() {
         cur_ver=$("$frpc_bin" -v 2>/dev/null | head -1 || true)
         echo "[*] 当前版本: ${cur_ver:-未知} → 目标版本: $ver"
         if [[ "$cur_ver" == *"$ver"* ]]; then
-            echo "[√] 已是最新版本，无需升级"
+            echo "[√] 已是最新版本 ($ver)，无需升级"
+            [[ $need_ttyd_restart -eq 1 ]] && setup_ttyd_service
             return 0
         fi
 
@@ -1254,24 +1261,18 @@ do_update() {
         new_bin=$(find "$tmp_dir" -name frpc -type f | head -1)
         [[ -z "$new_bin" ]] && { echo "[X] 下载包中未找到 frpc" >&2; exit 1; }
 
-        echo "[*] 停止服务 $svc..."
-        if [[ "$SERVICE_KIND" == "systemd" ]]; then
-            systemctl stop "$svc" || true
-        else
-            launchctl unload "$plist" 2>/dev/null || true
-        fi
-
+        # 先原子替换磁盘上的 frpc 二进制，再重启服务
         cp -f "$frpc_bin" "${frpc_bin}.old"
         install -m 755 "$new_bin" "$frpc_bin"
+        echo "[√] 已替换 frpc 二进制为 $($frpc_bin -v 2>/dev/null | head -1)，正在重启服务 $svc..."
 
-        echo "[*] 启动服务 $svc..."
         if [[ "$SERVICE_KIND" == "systemd" ]]; then
-            systemctl start "$svc"
+            systemctl restart "$svc"
             sleep 2
             if systemctl is-active --quiet "$svc"; then
                 rm -f "${frpc_bin}.old"
                 rm -rf "$tmp_dir"
-                echo "[√] 升级完成: $ver（服务未重建）"
+                echo "[√] 升级完成: $ver（服务已无缝重启）"
             else
                 echo "[!] 新版启动失败，回滚旧版本..."
                 systemctl stop "$svc" || true
@@ -1282,11 +1283,13 @@ do_update() {
                 exit 1
             fi
         else
+            launchctl unload "$plist" 2>/dev/null || true
             launchctl load "$plist"
             rm -f "${frpc_bin}.old"
             rm -rf "$tmp_dir"
             echo "[√] 升级完成: $ver"
         fi
+        [[ $need_ttyd_restart -eq 1 ]] && setup_ttyd_service
         return 0
     fi
 

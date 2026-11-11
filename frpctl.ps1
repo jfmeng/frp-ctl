@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     frpctl - 跨平台 FRP 客户端多实例管理与 WebSSH 运维工具（Windows 版）
 
@@ -747,27 +747,27 @@ function Update-FRP {
     $svcId = "frp_$RemotePort"
     $frpcExe = Join-Path $InstallDir 'frpc.exe'
 
-    # 若存在配套的 frp_ttyd_<port> 服务，同步升级 WebSSH 右侧文件管理抽屉组件
+    # 若存在配套的 frp_ttyd_<port> 服务，静默更新静态前端与网关脚本；仅在未接入 webssh_gw 时才重启 ttyd（避免在 WebSSH 内执行时自杀）
     $ttydSvcId = "frp_ttyd_$RemotePort"
     $ttydXml   = Join-Path $InstallDir "TTYDService_${RemotePort}.xml"
     if ((Test-ServiceExists -Name $ttydSvcId) -and (Test-Path $ttydXml)) {
-        Write-Host "[*] 同步升级 WebSSH 右侧文件管理器组件 ($ttydSvcId)..." -ForegroundColor Cyan
         Write-WebSSHAssets
         $xmlRaw = Get-Content $ttydXml -Raw -Encoding UTF8
-        $lpMatch = [regex]::Match($xmlRaw, '-p(?:ort)?\s+(\d+)', 'IgnoreCase')
-        $acMatch = [regex]::Match($xmlRaw, '-c\s+"?([^"\s<]+)"?')
-        if ($lpMatch.Success -and $acMatch.Success) {
-            $lpVal = $lpMatch.Groups[1].Value
-            $acVal = $acMatch.Groups[1].Value
-            $gwScript = Join-Path $InstallDir "webssh_gw.ps1"
-            $ttydExe  = Join-Path $InstallDir "ttyd.exe"
-            $xmlRaw = $xmlRaw -replace '<executable>.*?</executable>', '<executable>powershell.exe</executable>'
-            $xmlRaw = $xmlRaw -replace '<arguments>.*?</arguments>', "<arguments>-NoProfile -ExecutionPolicy Bypass -File `"$gwScript`" -Port $lpVal -c `"$acVal`" -Ttyd `"$ttydExe`" -Root `"$InstallDir`" -RemotePort $RemotePort -Token `"$AuthToken`"</arguments>"
-            $xmlRaw | Out-File -FilePath $ttydXml -Encoding utf8
-            sc.exe stop $ttydSvcId 2>&1 | Out-Null
-            Wait-ServiceStopped -Name $ttydSvcId -TimeoutSec 10 | Out-Null
-            sc.exe start $ttydSvcId 2>&1 | Out-Null
-            Write-Host "[√] WebSSH 文件管理器组件已就绪" -ForegroundColor Green
+        if ($xmlRaw -notmatch 'webssh_gw\.ps1') {
+            $lpMatch = [regex]::Match($xmlRaw, '-p(?:ort)?\s+(\d+)', 'IgnoreCase')
+            $acMatch = [regex]::Match($xmlRaw, '-c\s+"?([^"\s<]+)"?')
+            if ($lpMatch.Success -and $acMatch.Success) {
+                $lpVal = $lpMatch.Groups[1].Value
+                $acVal = $acMatch.Groups[1].Value
+                $gwScript = Join-Path $InstallDir "webssh_gw.ps1"
+                $ttydExe  = Join-Path $InstallDir "ttyd.exe"
+                $xmlRaw = $xmlRaw -replace '<executable>.*?</executable>', '<executable>powershell.exe</executable>'
+                $xmlRaw = $xmlRaw -replace '<arguments>.*?</arguments>', "<arguments>-NoProfile -ExecutionPolicy Bypass -File `"$gwScript`" -Port $lpVal -c `"$acVal`" -Ttyd `"$ttydExe`" -Root `"$InstallDir`" -RemotePort $RemotePort -Token `"$AuthToken`"</arguments>"
+                $xmlRaw | Out-File -FilePath $ttydXml -Encoding utf8
+                sc.exe stop $ttydSvcId 2>&1 | Out-Null
+                Wait-ServiceStopped -Name $ttydSvcId -TimeoutSec 10 | Out-Null
+                sc.exe start $ttydSvcId 2>&1 | Out-Null
+            }
         }
     }
 
